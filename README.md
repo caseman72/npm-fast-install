@@ -68,6 +68,7 @@ Installs and caches all packages defined in the project directory's `package.jso
 
  * `options` - An object with various settings. All options are _optional_.
 
+   * `dependencies` (object) - override the dependencies from package.json.
    * `allowShrinkwrap` (boolean) - When true, tells npm to honor shrinkwrap settings. Defaults to `false`.
    * `cacheDir` (string) - The directory to cache modules. Defaults to `~/.npm-fast-install`.
    * `dir` (string) - The directory containing the package.json. Defaults to `process.cwd()`.
