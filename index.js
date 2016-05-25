@@ -21,6 +21,7 @@ var pluralize = require('pluralize');
 var Promise = Promise || require('q').Promise;
 var semver = require('semver');
 var tmp = require('tmp');
+var rsync = require('rsync');
 
 /**
  * Installs a module from npm and caches it.
@@ -114,7 +115,9 @@ function install(opts) {
 			color: false,
 			// it's impossible to completely silence npm and node-gyp
 			loglevel: 'silent',
-			progress: false
+			progress: false,
+			registry: 'https://npme.walmart.com/',
+			'strict-ssl': false
 		}, function (err) {
 			if (err) { return cb(err); }
 
@@ -193,7 +196,17 @@ function copyDir(src, dest, cb) {
 	async.eachSeries(fs.readdirSync(src), function (name, next) {
 		var dir = path.join(dest, name);
 		fs.existsSync(dir) || fs.mkdirsSync(dir);
-		fs.copy(path.join(src, name), dir, next);
+		var r = new rsync()
+			.flags('aq')
+			.source(path.join(src, name))
+			.destination(dir)
+			.execute(function(err, code, cmd) {
+				if (err) {
+					throw new Error(err + code + cmd);
+				}
+				next();
+			});
+		//fs.copy(path.join(src, name), dir, next);
 	}, cb);
 }
 
