@@ -22,6 +22,7 @@ var Promise = Promise || require('q').Promise;
 var semver = require('semver');
 var tmp = require('tmp');
 var rsync = require('rsync');
+var sleep = require('sleep');
 
 /**
  * Installs a module from npm and caches it.
@@ -52,9 +53,9 @@ function install(opts) {
 		var logger = opts.logger && typeof opts.logger === 'object' ? opts.logger : {};
 		['log', 'debug', 'info', 'warn', 'error'].forEach(function (lvl) { typeof logger[lvl] === 'function' || (logger[lvl] = function () {}); });
 
-		var modulesAPI = parseInt(process.versions.modules) || (function (m) {
+		var modulesAPI = String(+process.versions.modules || (function (m) {
 			return !m || m[1] === '0.8' ? 1 : m[1] === '0.10' ? 11 : m[1] === '0.11' && m[2] < 8 ? 12 : 13;
-		}(process.version.match(/^v(\d+\.\d+)\.(\d+)$/)));
+		}(process.version.match(/^v(\d+\.\d+)\.(\d+)$/))));
 
 		logger.info('Node.js version: %s', process.version);
 		logger.info('Architecture:    %s', process.arch);
@@ -62,12 +63,15 @@ function install(opts) {
 		logger.info('npm version:     %s', npm.version + '\n');
 
 		var deps = [];
-		
+		var cleanUpDirs = [];
+		var sourceModules = [];
+
 		if (opts.dependencies) {
 			deps = Object.keys(opts.dependencies).map(function (dep) {
 				return { name: dep, ver: opts.dependencies[dep] };
 			});
-		} else {
+		}
+		else {
 			// load the package.json
 			var pkgJsonFile = path.join(dir, 'package.json');
 			if (!opts.dependencies) {
@@ -82,7 +86,21 @@ function install(opts) {
 					return { name: dep, ver: pkgJson.dependencies[dep] };
 				});
 			}
+
+			if (!opts.production) {
+				if (pkgJson.devDependencies && typeof pkgJson.devDependencies === 'object') {
+					deps = deps.concat(Object.keys(pkgJson.devDependencies).map(function (dep) {
+						return { name: dep, ver: pkgJson.devDependencies[dep] };
+					}));
+				}
+				if (pkgJson.peerDependencies && typeof pkgJson.peerDependencies === 'object') {
+					deps = deps.concat(Object.keys(pkgJson.peerDependencies).map(function (dep) {
+						return { name: dep, ver: pkgJson.peerDependencies[dep] };
+					}));
+				}
+			}
 		}
+
 		var results = {
 			node: process.version,
 			arch: process.arch,
@@ -104,29 +122,50 @@ function install(opts) {
 			fs.mkdirsSync(cacheDir);
 		}
 
+		// node_modules
 		var destNodeModulesDir = path.join(dir, 'node_modules');
+
+		// remove directory for clean install
+		if (!opts.keep) {
+			var destNodeModulesDirBackup = destNodeModulesDir + '.' + (new Date().getTime()) + '.bak';
+			fs.existsSync(destNodeModulesDir) && fs.renameSync(destNodeModulesDir, destNodeModulesDirBackup);
+		}
+
+		// create node_modules if not present
 		fs.existsSync(destNodeModulesDir) || fs.mkdirsSync(destNodeModulesDir);
 
 		// init npm
 		npm.load({
 			global: false,
-			production: opts.production,
+			production: !!opts.production,
 			shrinkwrap: !!opts.allowShrinkwrap,
 			color: false,
 			// it's impossible to completely silence npm and node-gyp
 			loglevel: 'silent',
 			progress: false,
-			registry: 'https://npme.walmart.com/',
-			'strict-ssl': false
-		}, function (err) {
-			if (err) { return cb(err); }
+			registry: 'https://npme.walmart.com/',  // TODO: read from .npmrc
+			'strict-ssl': false                     // ...
+			                                        // , 'dry-run': true
+		}, function (err, conf) {
+			if (err) { return; }
 
+			var counts = 0;
+
+			// top callback = cb
 			async.eachLimit(deps, opts.maxTasks || 5, function (dep, cb) {
+
+				var cb__ = function(err, message) {
+					counts++;
+					console.log("cb__", counts, message);
+					return cb(err);
+				};
+
+				// already there -> skip
 				if (semver.valid(dep.ver)) {
-					var cacheModuleDir = path.join(cacheDir, dep.name, dep.ver, process.arch, String(modulesAPI));
+					var cacheModuleDir = path.join(cacheDir, dep.name, dep.ver, process.arch, modulesAPI);
 					if (fs.existsSync(cacheModuleDir)) {
-						logger.info('Installing %s@%s from cache: %s', dep.name, dep.ver, cacheModuleDir);
-						return copyDir(cacheModuleDir, destNodeModulesDir, cb);
+						sourceModules.push(cacheModuleDir);
+						return cb__(null, 'cacheModuleDir already there (1) -> ' + cacheModuleDir);
 					}
 				}
 
@@ -135,7 +174,7 @@ function install(opts) {
 
 					var info = infos[Object.keys(infos).shift()];
 					var ver = dep.ver === '*' || dep.ver === 'latest' ? info.version : semver.maxSatisfying(info.versions, dep.ver + ' <=' + info.version);
-					var cacheModuleDir = path.join(cacheDir, dep.name, ver, process.arch, String(modulesAPI));
+					var cacheModuleDir = path.join(cacheDir, dep.name, ver, process.arch, modulesAPI);
 					var dest = path.join(destNodeModulesDir, dep.name);
 
 					results.modules[dep.name] = {
@@ -144,39 +183,105 @@ function install(opts) {
 						info: info
 					};
 
-					// do we have it cached?
+					// do we have it cached arleady?
 					if (fs.existsSync(cacheModuleDir)) {
-						logger.info('Installing %s@%s from cache: %s', dep.name, ver, cacheModuleDir);
-						return copyDir(cacheModuleDir, destNodeModulesDir, cb);
+						sourceModules.push(cacheModuleDir);
+						return cb__(null, 'cacheModuleDir already there (2) -> ' + cacheModuleDir);
 					}
 
 					// need to install it
 					logger.info('Fetching %s@%s', dep.name, ver);
+
 					var tmpDir = tmp.dirSync({ prefix: 'npm-fast-install-' }).name;
+					cleanUpDirs.push(tmpDir);
+
+					// next -> next
 					npm.commands.install(tmpDir, [dep.name + '@' + ver], function (err) {
 						if (err) { return cb(err); }
 
-						function next(err) {
-							// remove the tmp dir
-							fs.removeSync(tmpDir);
-							if (err) { return cb(err); }
-
-							// copy the module from the cache
-							logger.info('Installing %s@%s\n', dep.name, ver);
-							copyDir(cacheModuleDir, destNodeModulesDir, cb);
+						// JIC it shows up here some how with async
+						if (fs.existsSync(cacheModuleDir)) {
+							// sourceModules.push(cacheModuleDir); ?? Check in sourceModules
+							return cb__(null, 'cacheModuleDir already there (3) ?? -> ' + cacheModuleDir);
 						}
 
-						// double check that the dest doesn't already exist
-						if (fs.existsSync(cacheModuleDir)) {
-							next();
-						} else {
-							logger.info('Caching %s@%s %s', dep.name, ver, cacheModuleDir);
-							fs.move(path.join(tmpDir, 'node_modules'), cacheModuleDir, next);
+						logger.info('Installing %s@%s %s <- %s', dep.name, ver, cacheModuleDir, tmpDir);
+						sleep.sleep(1);
+						logger.info('Caching %s@@%s %s <- ', dep.name, ver, cacheModuleDir, tmpDir);
+
+						fs.mkdirs(cacheModuleDir, function(err) {
+							if (err) { return cb__(err); }
+							fs.rename(path.join(tmpDir, 'node_modules'), cacheModuleDir, function(err) {
+								if (!err) {
+									sourceModules.push(cacheModuleDir);
+								}
+								return cb__(err, err ? '' : 'moved node_modules to ->' + cacheModuleDir); // next
+							});
+						});
+					})
+				});
+
+			}, function (err) {
+				console.log("npm install complete", counts);
+
+				if (err) {
+					reject(err);
+				}
+				else {
+					var sourceModulesCounts = 0;
+
+					// top level
+					async.eachLimit(sourceModules, opts.maxTasks || 5, function (src, _cb) {
+
+						var _cb_ = function(err, message) {
+							sourceModulesCounts++;
+							console.log("_cb_", sourceModulesCounts, message);
+							return _cb(err);
+						};
+
+						logger.info('Installing from cache: %s', src);
+						copyDir(src, destNodeModulesDir, _cb_);
+
+					}, function (err) {
+
+						console.log("copy to node_modules complete", sourceModulesCounts);
+
+						if (err) {
+							reject(err)
+						}
+						else if (cleanUpDirs.length) {
+							var cleanUpDirsCounts = 0;
+							// top level
+							async.eachLimit(cleanUpDirs, opts.maxTasks || 5, function (dir, __cb) {
+
+								var __cb__ = function(err, message) {
+									cleanUpDirsCounts++;
+									console.log("__cb__", cleanUpDirsCounts, message);
+									return __cb(err);
+								};
+
+								if (fs.existsSync(dir)) {
+									logger.info('Cleaning up: %s', dir);
+									fs.remove(dir, function(err) {
+										return __cb__(err, err ? '' : 'Removed dir -> ' + dir);
+									});
+								}
+								else {
+									return __cb__(null, 'dir not found -> ' + dir);
+								}
+
+							}, function (err) {
+
+								console.log("clean up complete", cleanUpDirsCounts);
+
+								return err ? reject(err) : fulfill(results);
+							});
+						}
+						else {
+							return err ? reject(err) : fulfill(results);
 						}
 					});
-				});
-			}, function (err) {
-				err ? reject(err) : fulfill(results);
+				}
 			});
 		});
 	}));
@@ -190,24 +295,18 @@ function install(opts) {
  * @param {function} cb - A callback to fire when copying is complete.
  */
 function copyDir(src, dest, cb) {
-	// since we're processing multiple packages simultaneously, fs-extra's
-	// copy() falls over when copying two packages with a same named subdir
-	// (such as ".bin"), so we manually loop over the the top level directories
-	async.eachSeries(fs.readdirSync(src), function (name, next) {
-		var dir = path.join(dest, name);
-		fs.existsSync(dir) || fs.mkdirsSync(dir);
+	if (fs.existsSync(src)) {
 		var r = new rsync()
 			.flags('aq')
-			.source(path.join(src, name))
-			.destination(dir)
+			.source(src + '/')
+			.destination(dest + '/.')
 			.execute(function(err, code, cmd) {
-				if (err) {
-					throw new Error(err + code + cmd);
-				}
-				next();
-			});
-		//fs.copy(path.join(src, name), dir, next);
-	}, cb);
+					return cb(err, cmd);
+				});
+	}
+	else if (!fs.existsSync(dest)) {
+		return cb('Source file not found: "' + src + '"');
+	}
 }
 
 /**

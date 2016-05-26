@@ -32,7 +32,7 @@ program
 	.version(pkgJson.version, '-v, --version')
 	.description('Installs and caches npm modules.')
 	.usage('[project-dir] [options]')
-	.option('-a, --all', 'Installs all module deps; by default only installs production deps')
+	.option('-p, --production', 'Installs all module deps by default set to only install production deps')
 	.option('-c, --cache-dir [dir]', 'Cache directory; defaults to "~/.npm-fast-install"')
 	.option('--allow-shrinkwrap', 'Force disable shrinkwrap; defaults to false')
 	.option('-j, --json', 'Outputs results as JSON')
@@ -44,14 +44,14 @@ if (program.json) {
 	['log', 'debug', 'info', 'warn', 'error'].forEach(function (lvl) { typeof logger[lvl] === 'function' || (logger[lvl] = function () {}); });
 }
 
-logger.info(banner);
+//logger.info(banner);
 
 nfi.install({
 		cacheDir: program.cacheDir,
 		dir: program.args.shift(),
 		allowShrinkwrap: !!program.allowShrinkwrap,
 		logger: logger,
-		production: !program.all
+		production: !!program.production
 	})
 	.then(function (results) {
 		results.time = (new Date) - start;
