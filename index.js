@@ -22,7 +22,7 @@ var Promise = Promise || require('q').Promise;
 var semver = require('semver');
 var tmp = require('tmp');
 var rsync = require('rsync');
-var sleep = require('sleep');
+//var sleep = require('sleep');
 
 /**
  * Installs a module from npm and caches it.
@@ -137,7 +137,7 @@ function install(opts) {
 		// init npm
 		npm.load({
 			global: false,
-			production: !!opts.production,
+			production: false,
 			shrinkwrap: !!opts.allowShrinkwrap,
 			color: false,
 			// it's impossible to completely silence npm and node-gyp
@@ -174,6 +174,7 @@ function install(opts) {
 
 					var info = infos[Object.keys(infos).shift()];
 					var ver = dep.ver === '*' || dep.ver === 'latest' ? info.version : semver.maxSatisfying(info.versions, dep.ver + ' <=' + info.version);
+					if (ver === null) ver = info.version;
 					var cacheModuleDir = path.join(cacheDir, dep.name, ver, process.arch, modulesAPI);
 					var dest = path.join(destNodeModulesDir, dep.name);
 
@@ -205,17 +206,28 @@ function install(opts) {
 							return cb__(null, 'cacheModuleDir already there (3) ?? -> ' + cacheModuleDir);
 						}
 
-						logger.info('Installing %s@%s %s <- %s', dep.name, ver, cacheModuleDir, tmpDir);
-						sleep.sleep(1);
-						logger.info('Caching %s@@%s %s <- ', dep.name, ver, cacheModuleDir, tmpDir);
+						logger.info('Installing %s@%s %s -> %s', dep.name, ver, tmpDir, cacheModuleDir);
+						//sleep.sleep(1);
 
 						fs.mkdirs(cacheModuleDir, function(err) {
 							if (err) { return cb__(err); }
-							fs.rename(path.join(tmpDir, 'node_modules'), cacheModuleDir, function(err) {
-								if (!err) {
-									sourceModules.push(cacheModuleDir);
+
+							// try to rename first - fast
+							var src = path.join(tmpDir, 'node_modules');
+							fs.rename(src, cacheModuleDir, function(err) {
+								if (err) {
+									// try to copy - different partitions
+									copyDir(src, cacheModuleDir, function(err, cmd) {
+										if (!err) {
+											sourceModules.push(cacheModuleDir);
+										}
+										return cb__(err, err ? '' : cmd);
+									});
 								}
-								return cb__(err, err ? '' : 'moved node_modules to ->' + cacheModuleDir); // next
+								else {
+									sourceModules.push(cacheModuleDir);
+									return cb__(null, 'moved node_modules to ->' + cacheModuleDir);
+								}
 							});
 						});
 					})
