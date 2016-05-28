@@ -22,7 +22,6 @@ var Promise = Promise || require('q').Promise;
 var semver = require('semver');
 var tmp = require('tmp');
 var rsync = require('rsync');
-//var sleep = require('sleep');
 
 /**
  * Installs a module from npm and caches it.
@@ -136,6 +135,7 @@ function install(opts) {
 
 		// init npm
 		npm.load({
+			cache: path.join(process.env.HOME, '.npm'),
 			global: false,
 			production: false,
 			shrinkwrap: !!opts.allowShrinkwrap,
@@ -145,18 +145,17 @@ function install(opts) {
 			progress: false,
 			registry: 'https://npme.walmart.com/',  // TODO: read from .npmrc
 			'strict-ssl': false                     // ...
-			                                        // , 'dry-run': true
 		}, function (err, conf) {
 			if (err) { return; }
 
 			var counts = 0;
 
 			// top callback = cb
-			async.eachLimit(deps, opts.maxTasks || 5, function (dep, cb) {
+			async.eachLimit(deps, opts.maxTasks || 20, function (dep, cb) {
 
 				var cb__ = function(err, message) {
 					counts++;
-					console.log("cb__", counts, message);
+					console.log('cb__', counts, message);
 					return cb(err);
 				};
 
@@ -207,13 +206,13 @@ function install(opts) {
 						}
 
 						logger.info('Installing %s@%s %s -> %s', dep.name, ver, tmpDir, cacheModuleDir);
-						//sleep.sleep(1);
 
 						fs.mkdirs(cacheModuleDir, function(err) {
 							if (err) { return cb__(err); }
 
-							// try to rename first - fast
 							var src = path.join(tmpDir, 'node_modules');
+
+							// try to rename first - fast
 							fs.rename(src, cacheModuleDir, function(err) {
 								if (err) {
 									// try to copy - different partitions
@@ -234,7 +233,7 @@ function install(opts) {
 				});
 
 			}, function (err) {
-				console.log("npm install complete", counts);
+				console.log('npm install complete', counts);
 
 				if (err) {
 					reject(err);
@@ -243,11 +242,11 @@ function install(opts) {
 					var sourceModulesCounts = 0;
 
 					// top level
-					async.eachLimit(sourceModules, opts.maxTasks || 5, function (src, _cb) {
+					async.eachLimit(sourceModules, opts.maxTasks || 20, function (src, _cb) {
 
 						var _cb_ = function(err, message) {
 							sourceModulesCounts++;
-							console.log("_cb_", sourceModulesCounts, message);
+							console.log('_cb_', sourceModulesCounts, message);
 							return _cb(err);
 						};
 
@@ -255,8 +254,7 @@ function install(opts) {
 						copyDir(src, destNodeModulesDir, _cb_);
 
 					}, function (err) {
-
-						console.log("copy to node_modules complete", sourceModulesCounts);
+						console.log('copy to node_modules complete', sourceModulesCounts);
 
 						if (err) {
 							reject(err)
@@ -264,11 +262,11 @@ function install(opts) {
 						else if (cleanUpDirs.length) {
 							var cleanUpDirsCounts = 0;
 							// top level
-							async.eachLimit(cleanUpDirs, opts.maxTasks || 5, function (dir, __cb) {
+							async.eachLimit(cleanUpDirs, opts.maxTasks || 20, function (dir, __cb) {
 
 								var __cb__ = function(err, message) {
 									cleanUpDirsCounts++;
-									console.log("__cb__", cleanUpDirsCounts, message);
+									console.log('__cb__', cleanUpDirsCounts, message);
 									return __cb(err);
 								};
 
@@ -283,8 +281,7 @@ function install(opts) {
 								}
 
 							}, function (err) {
-
-								console.log("clean up complete", cleanUpDirsCounts);
+								console.log('clean up complete', cleanUpDirsCounts);
 
 								return err ? reject(err) : fulfill(results);
 							});
